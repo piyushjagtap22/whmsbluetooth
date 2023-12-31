@@ -1,121 +1,202 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:flutter_blue/flutter_blue.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(MyApp());
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Bluetooth Serial Monitor',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-        useMaterial3: true,
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'ESP32 Connect',
+      home: BLETest(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  final String title;
-
+class BLETest extends StatefulWidget {
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  _BLETestState createState() => _BLETestState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  FlutterBlue flutterBlue = FlutterBlue.instance;
+class _BLETestState extends State<BLETest> {
+  // 원하는 것과의 연결을 위해 필요
+  final String SERVICE_UUID = "00002a05-0000-1000-8000-00805f9b34fb";
+  final String TARGET_DEVICE_NAME = "WHMS";
+
+  // FlutterBluePlus 사용을 위한 instance 설정
+  FlutterBluePlus flutterBlue = FlutterBluePlus();
+
+  bool isDevice = false;
+  bool isConnected = false;
+
+  late List<ScanResult> scanResult; // Bluetooth Device Scan List
   late BluetoothDevice targetDevice;
-  late BluetoothCharacteristic targetCharacteristic;
 
-  TextEditingController textController = TextEditingController();
+  String connectionText = "No connection";
 
-  int _counter = 0;
+  double speed = 0.0;
+  double total = 0.0;
 
-  void _incrementCounter() {
+  // Scan을 시작함 List에 넣기만 하는 함수.
+  Future<void> startScan() async {
+    print("Start Scan!");
     setState(() {
-      _counter++;
+      connectionText = "Start Scanning";
+    });
+
+    // 3초간 스캔 진행함
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 3));
+
+    // Scan이 시작되는 동안에 받는 listener 관련 액션을 수행함.
+    FlutterBluePlus.scanResults
+        .listen((results) {}, onError: (e) => print(e))
+        .onData((data) {
+      print(data.length);
+      scanResult = data;
+    });
+    // Stop scanning
+    FlutterBluePlus.stopScan();
+    Future.delayed(const Duration(seconds: 5), () {
+      scanDevice();
     });
   }
 
-  @override
-  void initState() {
-    super.initState();
-    initBluetooth();
-  }
-
-  void initBluetooth() async {
-    await flutterBlue.isOn;
-    flutterBlue.scanResults.listen((List<ScanResult> results) {
-      for (ScanResult result in results) {
-        if (result.device.name == "WHMS") {
-          targetDevice = result.device;
-          connectToDevice();
+  // 검색된 디바이스 중 지정해둔 디바이스 검색
+  Future<void> scanDevice() async {
+    for (ScanResult r in scanResult) {
+      // 이 Device가 앞서 지정해둔 "CYCLE_TEST"와 같은지
+      if (r.device.name == TARGET_DEVICE_NAME) {
+        // 연결되었다면
+        if (!isConnected) {
+          // 해당 Device 정보를 변수 targetDevice에 저장
+          targetDevice = r.device;
+          // Device Connect를 여기서 함.
+          await connectToDevice(targetDevice);
         }
       }
-    });
-    flutterBlue.startScan();
-  }
-
-  void connectToDevice() async {
-    await targetDevice.connect();
-    List<BluetoothService> services = await targetDevice.discoverServices();
-    services.forEach((service) {
-      service.characteristics.forEach((characteristic) {
-        if (characteristic.uuid.toString() ==
-            "00002a05-0000-1000-8000-00805f9b34fb") {
-          targetCharacteristic = characteristic;
-        }
-      });
-    });
-  }
-
-  void sendText() {
-    if (targetCharacteristic != null) {
-      String textToSend = textController.text;
-      List<int> bytes = textToSend.codeUnits;
-      targetCharacteristic.write(bytes);
     }
   }
 
+  // 디바이스 연결
+  Future<void> connectToDevice(BluetoothDevice device) async {
+    print('*****.....CONNECTING.....*****');
+    setState(() {
+      connectionText = "Connect To Device";
+    });
+    if (device == null) return;
+
+    if (!isConnected) {
+      await device.connect();
+      isConnected = true;
+      isDevice = true;
+      print('*****DEVICE CONNECTED*****');
+      await discoverServices(device);
+    }
+  }
+
+  // 디바이스 연결 해제
+  disconnectFromDevice() {
+    if (targetDevice == null) {
+      print("No Device");
+      return;
+    }
+    targetDevice.disconnect();
+    flutterBlue = FlutterBluePlus();
+
+    setState(() {
+      isDevice = false;
+      isConnected = false;
+      connectionText = "Device Disconnected";
+    });
+  }
+
+  // 필요한 값들(서비스, 캐릭터리스틱 등)을 세팅
+  Future<void> discoverServices(BluetoothDevice device) async {
+    if (device == null) return;
+
+    print("*****DISCOVER SERVICES*****");
+
+    // 서비스 리스트 중 내 기기에 맞는 것을 찾아야함.
+    List<BluetoothService> services = await device.discoverServices();
+    services.forEach((service) {
+      // 연결된 기기가 연결하고자 했던 것의 uuid와 일치하는지 확인
+      if (service.uuid.toString() == SERVICE_UUID) {
+        service.characteristics.forEach((characteristic) {
+          characteristic.setNotifyValue(true);
+          characteristic.value.listen((value) {
+            if (value.length > 0) {
+              // 1. value값을 String.fromCharCodes를 통해 정수형 배열을 문자열로 파싱
+              // 2. '/'으로 total과 speed 값 분류
+              // 3. ':'으로 total과 speed 값을 double total과 speed에 각각 저장
+              List<String> temp = String.fromCharCodes(value).split("/");
+              total = double.parse(temp[0].split(":")[1]);
+              speed = double.parse(temp[1].split(":")[1]);
+            }
+            setState(
+                () {}); // UI State에서 변경 사항이 있음을 Flutter Framework에 알려주는 역할을 함.UI에 변경된 값이 반영되도록 build 메소드가 다시 실행 UI 에 변경된 값이 반영될 수 있도록 build 메소드가 다시 실행
+          });
+        });
+      }
+    });
+  }
+
+  // 화면 구성 내용
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
+        title: const Text('Flutter BLE study'),
+        actions: [
+          IconButton(
+              onPressed: () async {
+                await startScan();
+              },
+              icon: const Icon(Icons.search))
+        ],
+        leading: IconButton(
+            onPressed: () async {
+              await disconnectFromDevice();
+            },
+            icon: const Icon(Icons.cancel)),
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
+      body: Column(
+        children: [
+          Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              TextField(
-                controller: textController,
-                decoration: InputDecoration(labelText: 'Enter Text'),
-              ),
-              SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: sendText,
-                child: Text('Send'),
-              ),
+            children: <Widget>[
+              const Text('Current Status:',
+                  style: TextStyle(color: Colors.black, fontSize: 20.0)),
+              Text('[$connectionText]',
+                  style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 20.0,
+                      fontWeight: FontWeight.bold))
             ],
           ),
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              const Text('Device Info:',
+                  style: TextStyle(color: Colors.black, fontSize: 20.0)),
+              (isDevice)
+                  ? Text(
+                      'Device Name :[${targetDevice.name}]\nDevice total :[$total]\nDevice speed :[$speed]',
+                      style: const TextStyle(
+                          color: Colors.purple,
+                          fontSize: 20.0,
+                          fontWeight: FontWeight.bold))
+                  : const Text('[No Device Info]',
+                      style: TextStyle(
+                          color: Colors.purple,
+                          fontSize: 20.0,
+                          fontWeight: FontWeight.bold))
+            ],
+          ),
+        ],
       ),
     );
   }
